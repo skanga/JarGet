@@ -278,7 +278,7 @@ java -Djarget.log.level=VERBOSE -javaagent:jarget.jar MyScript.java
 
 ## License
 
-This project is authored by Shiraz Kanga. Please check the source code for specific license terms.
+This project is authored by Shiraz Kanga. It is licensed under Apache 2.0 license.
 
 ## Contributing
 
