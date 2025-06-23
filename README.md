@@ -1,6 +1,6 @@
-# Jarget
+# JarGet
 
-A secure Java agent that processes dependency comments similar to `uv` in Python. Jarget automatically resolves and downloads dependencies specified in Java source files using special comment directives, making it easy to manage dependencies without complex build files.
+A secure Java agent that processes dependency comments similar to `uv` in Python. JarGet automatically resolves and downloads dependencies specified in Java source files using special comment directives, making it easy to manage dependencies without complex build files.
 
 ## Features
 
@@ -13,7 +13,7 @@ A secure Java agent that processes dependency comments similar to `uv` in Python
 
 ## Quick Start
 
-1. **Download the agent JAR** (or build from source)
+1. **Download the agent JAR from repo root** (or build from source)
 2. **Add dependency comments** to your Java file:
    ```java
    // @dep org.apache.commons:commons-lang3:3.12.0
@@ -34,13 +34,13 @@ A secure Java agent that processes dependency comments similar to `uv` in Python
    java -javaagent:jarget.jar MyScript.java
    ```
 ### **PRO TIP**
-You can set the -javaagent as an environment variable and then it always "just works" without any modifications to the command line as shown below.
+You can set the -javaagent as an environment variable via JAVA_TOOL_OPTIONS or _JAVA_OPTIONS and then JarGet will always "just work" without any modifications to the command line. This is shown in the examples below.
    ```bash
    export JAVA_TOOL_OPTIONS="-javaagent:/path/to/your/jarget.jar" 
    java MyScript.java
    ```
 NOTE: On windows use 
-   ```
+   ```bash
    set JAVA_TOOL_OPTIONS="-javaagent:/path/to/your/jarget.jar"
    java MyScript.java
    ```
@@ -84,7 +84,7 @@ Add optional checksums for integrity verification:
 
 ## Configuration
 
-Configure Jarget using system properties (`-D`) or environment variables:
+You can configure JarGet using system properties (`-D`) or environment variables:
 
 ### Log Level
 ```bash
@@ -165,7 +165,7 @@ public class Example {
     
     public static void main(String[] args) {
         JSONObject obj = new JSONObject();
-        obj.put("message", "Hello from Jarget!");
+        obj.put("message", "Hello from JarGet!");
         logger.info("Created JSON: {}", obj.toString());
     }
 }
@@ -267,7 +267,7 @@ java -Djarget.log.level=VERBOSE -javaagent:jarget.jar MyScript.java
 
 ## Comparison with Other Tools
 
-| Feature | Jarget | Maven | Gradle | JBang |
+| Feature | JarGet | Maven | Gradle | JBang |
 |---------|--------|-------|--------|-------|
 | Zero config | ✅ | ❌ | ❌ | ✅ |
 | Inline dependencies | ✅ | ❌ | ❌ | ✅ |
