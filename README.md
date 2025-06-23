@@ -47,6 +47,8 @@ NOTE: On windows use
 
 ## Dependency Directives
 
+The most common use case for JarGet is to get jars from Maven, but it can also look elsewhere. You can give is a local jar file or even a directory filled with jar files. Or you can just provide a direct URL (useful for corporate artifactory repositories, etc). Here are all the options you can use. If you do not trust remote downloading (due to MITM attacks, etc) then JarGet also supports md5 and sha256 checksums. If they are provided then they will be validated before use.  
+
 ### Maven Dependencies
 ```java
 // @dep groupId:artifactId:version
@@ -84,7 +86,7 @@ Add optional checksums for integrity verification:
 
 ## Configuration
 
-You can configure JarGet using system properties (`-D`) or environment variables:
+You can configure JarGet using system properties (`-D`) or environment variables. Both will work and environment variables will be used if both are provided. Here are the properties that can be configured 
 
 ### Log Level
 ```bash
