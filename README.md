@@ -1,4 +1,4 @@
-# JarGet
+# JarGet - Single File Java, with libraries, made easy!
 
 A secure Java agent that processes dependency comments similar to `uv` in Python. JarGet automatically resolves and downloads dependencies specified in Java source files using special comment directives, making it easy to manage dependencies without complex build files.
 
@@ -217,7 +217,7 @@ jar cfm jarget.jar manifest.txt -C build .
 # Test the agent
 java -javaagent:jarget.jar YourScript.java
 ```
-
+Or just run the provided `build.sh` or `build.bat` scripts which do essentially the same thing.
 ## Cache Management
 
 View cache information:
@@ -225,7 +225,7 @@ View cache information:
 java -jar jarget.jar
 ```
 
-This displays:
+Along with help. this will also display:
 - Current configuration
 - Cache directory location
 - Cached dependencies and sizes
