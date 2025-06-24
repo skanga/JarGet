@@ -170,7 +170,7 @@ public class JargetAgent {
         handler.setFormatter(new SimpleFormatter() {
             @Override
             public String format(LogRecord record) {
-                return String.format("[JargetAgent] %s: %s%n", record.getLevel(), record.getMessage());
+                return String.format("[Jarget] %s: %s%n", record.getLevel(), record.getMessage());
             }
         });
         logger.addHandler(handler);
