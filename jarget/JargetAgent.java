@@ -87,7 +87,7 @@ public class JargetAgent {
 
     // Configuration variables
     private static int downloadTimeoutSeconds = 30;
-    private static long maxDownloadSize = 50 * 1024 * 1024; // 50MB
+    private static long maxDownloadSize = 100 * 1024 * 1024; // 100MB
     private static int maxRetries = 3;
     private static Path cacheDir = null;
 
