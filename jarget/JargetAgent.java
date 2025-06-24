@@ -14,10 +14,17 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.jar.JarFile;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Level;
@@ -55,6 +62,7 @@ import javax.net.ssl.SSLContext;
  *   <li>Max download size: {@code jarget.max.download.size} or {@code JARGET_MAX_DOWNLOAD_SIZE}</li>
  *   <li>Cache directory: {@code jarget.cache.dir} or {@code JARGET_CACHE_DIR}</li>
  *   <li>Max retries: {@code jarget.max.retries} or {@code JARGET_MAX_RETRIES}</li>
+ *   <li>Parallel downloads: {@code jarget.parallel.downloads} or {@code JARGET_PARALLEL_DOWNLOADS}</li>
  * </ul>
  * 
  * <h2>Security Features:</h2>
@@ -67,7 +75,7 @@ import javax.net.ssl.SSLContext;
  * </ul>
  * 
  * @author Shiraz Kanga
- * @version 1.0
+ * @version 1.1
  * @since 1.0
  */
 public class JargetAgent {
@@ -84,11 +92,14 @@ public class JargetAgent {
     private static final String CACHE_DIR_ENV = "JARGET_CACHE_DIR";
     private static final String MAX_RETRIES_PROP = "jarget.max.retries";
     private static final String MAX_RETRIES_ENV = "JARGET_MAX_RETRIES";
+    private static final String PARALLEL_DOWNLOADS_PROP = "jarget.parallel.downloads";
+    private static final String PARALLEL_DOWNLOADS_ENV = "JARGET_PARALLEL_DOWNLOADS";
 
     // Configuration variables
     private static int downloadTimeoutSeconds = 30;
     private static long maxDownloadSize = 100 * 1024 * 1024; // 100MB
     private static int maxRetries = 3;
+    private static int parallelDownloads = 5; // Default to 5 parallel downloads
     private static Path cacheDir = null;
 
     // Logger instance
@@ -327,6 +338,22 @@ public class JargetAgent {
             }
         }
 
+        // Initialize parallel downloads
+        String parallelStr = System.getProperty(PARALLEL_DOWNLOADS_PROP);
+        if (parallelStr == null) {
+            parallelStr = System.getenv(PARALLEL_DOWNLOADS_ENV);
+        }
+        if (parallelStr != null) {
+            try {
+                parallelDownloads = Integer.parseInt(parallelStr);
+                if (parallelDownloads <= 0) {
+                    parallelDownloads = 4; // Reset to default if invalid
+                }
+            } catch (NumberFormatException e) {
+                logger.fine("Invalid parallel downloads value, using default: 4");
+            }
+        }
+
         // Initialize cache directory
         String cacheDirStr = System.getProperty(CACHE_DIR_PROP);
         if (cacheDirStr == null) {
@@ -361,7 +388,7 @@ public class JargetAgent {
     }
 
     /**
-     * Processes all dependency comments from the source file.
+     * Processes all dependency comments from the source file, downloading in parallel.
      * Returns a classpath string containing all resolved dependency paths.
      *
      * @param command         The java command used to launch the application
@@ -376,196 +403,206 @@ public class JargetAgent {
             return "";
         }
 
-        logger.fine("Processing dependencies from: " + sourcePath);
+        logger.info("Processing dependencies from " + sourcePath + " with up to " + parallelDownloads + " parallel downloads.");
 
-        StringBuilder classpathBuilder = new StringBuilder();
+        ExecutorService executor = Executors.newFixedThreadPool(parallelDownloads);
+        List<Future<Path>> downloadFutures = new ArrayList<>();
+        StringBuilder localClasspathBuilder = new StringBuilder();
 
         try (BufferedReader reader = Files.newBufferedReader(sourcePath)) {
             String line;
             while ((line = reader.readLine()) != null) {
-                String jarPath = processDependencyLine(line, instrumentation);
-                if (jarPath != null && !jarPath.isEmpty()) {
-                    if (classpathBuilder.length() > 0) {
-                        classpathBuilder.append(File.pathSeparator);
+                line = line.trim();
+                Matcher depMatcher = DEP_PATTERN.matcher(line);
+                Matcher urlMatcher = URL_PATTERN.matcher(line);
+                Matcher jarMatcher = JAR_PATTERN.matcher(line);
+                Matcher dirMatcher = DIR_PATTERN.matcher(line);
+
+                if (depMatcher.find()) {
+                    String groupId = depMatcher.group(1);
+                    String artifactId = depMatcher.group(2);
+                    String version = depMatcher.group(3);
+                    String sha256Checksum = depMatcher.group(4);
+                    String md5Checksum = depMatcher.group(5);
+                    String depId = groupId + ":" + artifactId + ":" + version;
+
+                    logger.fine("Found dependency: " + depId + ". Queuing for download.");
+
+                    Callable<Path> downloadTask = () -> {
+                        try {
+                            return downloadMavenArtifact(groupId, artifactId, version, sha256Checksum, md5Checksum);
+                        } catch (Exception e) {
+                            logger.severe("Failed to resolve dependency " + depId + ": " + e.getMessage());
+                            return null; // Gracefully fail
+                        }
+                    };
+                    downloadFutures.add(executor.submit(downloadTask));
+                } else if (urlMatcher.find()) {
+                    String url = urlMatcher.group(1);
+                    String sha256Checksum = urlMatcher.group(2);
+                    String md5Checksum = urlMatcher.group(3);
+                    logger.fine("Found URL: " + url + ". Queuing for download.");
+
+                    Callable<Path> downloadTask = () -> {
+                        try {
+                            return downloadFromUrl(url, sha256Checksum, md5Checksum);
+                        } catch (Exception e) {
+                            logger.severe("Failed to download from URL " + url + ": " + e.getMessage());
+                            return null; // Gracefully fail
+                        }
+                    };
+                    downloadFutures.add(executor.submit(downloadTask));
+                } else if (jarMatcher.find()) {
+                    String jarPathStr = jarMatcher.group(1).trim();
+                    try {
+                        String resolvedPath = addLocalJar(jarPathStr, instrumentation);
+                        if (resolvedPath != null && !resolvedPath.isEmpty()) {
+                            if (localClasspathBuilder.length() > 0) localClasspathBuilder.append(File.pathSeparator);
+                            localClasspathBuilder.append(resolvedPath);
+                        }
+                    } catch (Exception e) {
+                        logger.severe("Error processing local JAR " + jarPathStr + ": " + e.getMessage());
                     }
-                    classpathBuilder.append(jarPath);
+                } else if (dirMatcher.find()) {
+                    String dirPathStr = dirMatcher.group(1).trim();
+                    try {
+                        String resolvedPaths = addJarsFromDirectory(dirPathStr, instrumentation);
+                        if (resolvedPaths != null && !resolvedPaths.isEmpty()) {
+                            if (localClasspathBuilder.length() > 0) localClasspathBuilder.append(File.pathSeparator);
+                            localClasspathBuilder.append(resolvedPaths);
+                        }
+                    } catch (Exception e) {
+                        logger.severe("Error processing directory " + dirPathStr + ": " + e.getMessage());
+                    }
                 }
             }
         }
 
-        return classpathBuilder.toString();
+        // Await completion of all downloads and add them to classpath
+        StringBuilder finalClasspathBuilder = new StringBuilder(localClasspathBuilder);
+        if (downloadFutures.size() > 0) {
+            logger.fine("Waiting for " + downloadFutures.size() + " downloads to complete...");
+        }
+
+        for (Future<Path> future : downloadFutures) {
+            try {
+                Path downloadedJarPath = future.get(); // Blocks until task is complete
+                if (downloadedJarPath != null) {
+                    addJarToClasspath(downloadedJarPath, instrumentation);
+                    if (finalClasspathBuilder.length() > 0) {
+                        finalClasspathBuilder.append(File.pathSeparator);
+                    }
+                    finalClasspathBuilder.append(downloadedJarPath.toAbsolutePath().toString());
+                    logger.info("Successfully processed dependency: " + downloadedJarPath.getFileName());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.severe("Dependency processing was interrupted.");
+                break;
+            } catch (Exception e) {
+                // Catches ExecutionException, which wraps exceptions from the Callable
+                logger.severe("A download task failed unexpectedly: " + e.getCause().getMessage());
+            }
+        }
+
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                logger.warning("Thread pool did not terminate gracefully, forcing shutdown.");
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+
+        logger.fine("All dependency processing finished.");
+        return finalClasspathBuilder.toString();
     }
 
     /**
-     * Processes a single line from the source file, checking for dependency comments.
-     * Supports @dep, @jar, @dir, and @url directives.
-     * Implements graceful degradation when dependencies fail.
+     * Downloads and verifies a Maven artifact.
+     * This method is designed to be called from a worker thread.
      *
-     * @param line            Line of source code to process
-     * @param instrumentation JVM instrumentation for runtime classpath modification
-     * @return Absolute path to the JAR file(s) added, or null if no dependency found or failed
+     * @return Path to the verified JAR file in the local cache.
+     * @throws Exception if download or verification fails.
      */
-    private static String processDependencyLine(String line, Instrumentation instrumentation) {
-        line = line.trim();
-
-        // Check for Maven dependency: // @dep groupId:artifactId:version [sha256:xxx|md5:xxx]
-        Matcher depMatcher = DEP_PATTERN.matcher(line);
-        if (depMatcher.find()) {
-            String groupId = depMatcher.group(1);
-            String artifactId = depMatcher.group(2);
-            String version = depMatcher.group(3);
-            String sha256Checksum = depMatcher.group(4);
-            String md5Checksum = depMatcher.group(5);
-
-            logger.fine("Found dependency: " + groupId + ":" + artifactId + ":" + version);
-
-            try {
-                return downloadAndAddDependency(groupId, artifactId, version, sha256Checksum, md5Checksum, instrumentation);
-            } catch (SecurityException e) {
-                logger.severe("Security error for dependency " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
-                return null;
-            } catch (IOException e) {
-                logger.severe("I/O error for dependency " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
-                return null;
-            } catch (Exception e) {
-                logger.severe("Unexpected error for dependency " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
-                return null;
-            }
-        }
-
-        // Check for local JAR file: // @jar path/to/file.jar
-        Matcher jarMatcher = JAR_PATTERN.matcher(line);
-        if (jarMatcher.find()) {
-            String jarPath = jarMatcher.group(1).trim();
-            logger.fine("Found JAR: " + jarPath);
-
-            try {
-                return addLocalJar(jarPath, instrumentation);
-            } catch (SecurityException e) {
-                logger.severe("Security error for JAR: " + jarPath + ": " + e.getMessage());
-                return null;
-            } catch (IOException e) {
-                logger.severe("I/O error for JAR: " + jarPath + ": " + e.getMessage());
-                return null;
-            } catch (Exception e) {
-                logger.severe("Unexpected error for JAR: " + jarPath + ": " + e.getMessage());
-                return null;
-            }
-        }
-
-        // Check for directory of JARs: // @dir path/to/directory/
-        Matcher dirMatcher = DIR_PATTERN.matcher(line);
-        if (dirMatcher.find()) {
-            String dirPath = dirMatcher.group(1).trim();
-            logger.fine("Found directory: " + dirPath);
-
-            try {
-                return addJarsFromDirectory(dirPath, instrumentation);
-            } catch (SecurityException e) {
-                logger.severe("Security error for directory: " + dirPath + ": " + e.getMessage());
-                return null;
-            } catch (IOException e) {
-                logger.severe("I/O error for directory: " + dirPath + ": " + e.getMessage());
-                return null;
-            } catch (Exception e) {
-                logger.severe("Unexpected error for directory: " + dirPath + ": " + e.getMessage());
-                return null;
-            }
-        }
-
-        // Check for URL download: // @url https://example.com/lib.jar [sha256:xxx|md5:xxx]
-        Matcher urlMatcher = URL_PATTERN.matcher(line);
-        if (urlMatcher.find()) {
-            String url = urlMatcher.group(1);
-            String sha256Checksum = urlMatcher.group(2);
-            String md5Checksum = urlMatcher.group(3);
-            logger.fine("Found URL: " + url);
-
-            try {
-                return downloadAndAddFromUrl(url, sha256Checksum, md5Checksum, instrumentation);
-            } catch (SecurityException e) {
-                logger.severe("Security error for URL: " + url + ": " + e.getMessage());
-                return null;
-            } catch (IOException e) {
-                logger.severe("I/O error for URL: " + url + ": " + e.getMessage());
-                return null;
-            } catch (Exception e) {
-                logger.severe("Unexpected error for URL: " + url + ": " + e.getMessage());
-                return null;
-            }
-        }
-
-        // No dependency directive found in this line
-        return null;
-    }
-
-    /**
-     * Downloads a Maven artifact from Maven Central and adds it to the classpath.
-     * Uses local cache to avoid re-downloading existing artifacts.
-     * <p>
-     * This method implements the complete lifecycle for Maven dependency resolution:
-     * </p>
-     * <ol>
-     *   <li>Validates Maven coordinates to prevent injection attacks</li>
-     *   <li>Checks local cache for existing artifact</li>
-     *   <li>Downloads from Maven Central if not cached</li>
-     *   <li>Verifies integrity using provided checksums</li>
-     *   <li>Validates the JAR file structure</li>
-     *   <li>Adds to runtime classpath via instrumentation</li>
-     * </ol>
-     *
-     * @param groupId         Maven group ID (e.g., "org.apache.commons")
-     * @param artifactId      Maven artifact ID (e.g., "commons-lang3")
-     * @param version         Version string (e.g., "3.12.0")
-     * @param sha256Checksum  Optional SHA-256 checksum for verification (64 hex chars)
-     * @param md5Checksum     Optional MD5 checksum for verification (32 hex chars, alternative to SHA-256)
-     * @param instrumentation JVM instrumentation for runtime classpath modification
-     * @return Absolute path to the downloaded JAR file
-     * @throws Exception If download fails, validation fails, or security checks fail
-     */
-    private static String downloadAndAddDependency(String groupId, String artifactId, String version,
-                                                   String sha256Checksum, String md5Checksum, Instrumentation instrumentation) throws Exception {
-
-        // Validate inputs to prevent injection attacks
+    private static Path downloadMavenArtifact(String groupId, String artifactId, String version,
+                                              String sha256Checksum, String md5Checksum) throws Exception {
         validateMavenCoordinate(groupId, artifactId, version);
-
         String filename = artifactId + "-" + version + ".jar";
         Path cacheFile = getCacheDir().resolve(filename);
 
-        // Check if already cached with proper TOCTOU handling
         if (Files.exists(cacheFile)) {
-            logger.fine("Using cached: " + filename);
-            try {
-                if (!verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
-                    logger.severe("WARNING: Cached file checksum mismatch for " + filename);
-                    Files.deleteIfExists(cacheFile); // Use deleteIfExists to handle race conditions
-                } else {
-                    addJarToClasspath(cacheFile, instrumentation);
-                    return cacheFile.toAbsolutePath().toString();
-                }
-            } catch (IOException e) {
-                logger.fine("Cache file disappeared or corrupted, re-downloading: " + filename);
+            logger.fine("Found cached file for " + filename + ", verifying...");
+            if (verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
+                validateJarFile(cacheFile); // Re-validate just in case
+                logger.fine("Using cached and verified: " + filename);
+                return cacheFile;
+            } else {
+                logger.warning("Cached file checksum mismatch for " + filename + ". Re-downloading.");
+                Files.deleteIfExists(cacheFile);
             }
         }
 
-        // Download from Maven Central (most trusted)
         String downloadUrl = buildMavenCentralUrl(groupId, artifactId, version);
-        logger.fine("Downloading: " + downloadUrl);
-
+        logger.info("Downloading: " + downloadUrl);
         downloadFile(downloadUrl, cacheFile);
 
-        // Verify checksum if provided
         if (!verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
             Files.deleteIfExists(cacheFile);
             throw new SecurityException("Checksum verification failed for " + filename);
         }
 
         validateJarFile(cacheFile);
+        logger.fine("Successfully downloaded and verified: " + filename);
+        return cacheFile;
+    }
 
-        addJarToClasspath(cacheFile, instrumentation);
-        logger.fine("Successfully added: " + filename);
+    /**
+     * Downloads and verifies a JAR from a direct URL.
+     * This method is designed to be called from a worker thread.
+     *
+     * @return Path to the verified JAR file in the local cache.
+     * @throws Exception if download or verification fails.
+     */
+    private static Path downloadFromUrl(String urlString, String sha256Checksum, String md5Checksum) throws Exception {
+        URL url = new URL(urlString);
+        if (!isTrustedRepository(urlString)) {
+            throw new SecurityException("Untrusted repository: " + url.getHost());
+        }
 
-        return cacheFile.toAbsolutePath().toString();
+        String urlPath = url.getPath();
+        String filename = urlPath.substring(urlPath.lastIndexOf('/') + 1);
+        if (filename.isEmpty() || !filename.endsWith(".jar")) {
+            filename = "url-" + Integer.toHexString(urlString.hashCode()) + ".jar";
+        }
+
+        Path cacheFile = getCacheDir().resolve(filename);
+
+        if (Files.exists(cacheFile)) {
+            logger.fine("Found cached file for " + urlString + ", verifying...");
+            if (verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
+                validateJarFile(cacheFile);
+                logger.fine("Using cached and verified: " + filename);
+                return cacheFile;
+            } else {
+                logger.warning("Cached file checksum mismatch for " + filename + ". Re-downloading.");
+                Files.deleteIfExists(cacheFile);
+            }
+        }
+
+        logger.info("Downloading from URL: " + urlString);
+        downloadFile(urlString, cacheFile);
+
+        if (!verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
+            Files.deleteIfExists(cacheFile);
+            throw new SecurityException("Checksum verification failed for " + filename);
+        }
+
+        validateJarFile(cacheFile);
+        logger.fine("Successfully downloaded and verified: " + filename);
+        return cacheFile;
     }
 
     /**
@@ -613,7 +650,7 @@ public class JargetAgent {
         validateJarFile(jarFile);
 
         addJarToClasspath(jarFile, instrumentation);
-        logger.fine("Successfully added local JAR: " + jarFile.getFileName());
+        logger.info("Successfully added local JAR: " + jarFile.getFileName());
 
         return jarFile.toAbsolutePath().toString();
     }
@@ -692,7 +729,7 @@ public class JargetAgent {
             try {
                 validateJarFile(jarFile.toPath());
                 addJarToClasspath(jarFile.toPath(), instrumentation);
-                logger.fine("Added JAR from directory: " + jarFile.getName());
+                logger.info("Added JAR from directory: " + jarFile.getName());
 
                 if (classpathBuilder.length() > 0) {
                     classpathBuilder.append(File.pathSeparator);
@@ -705,78 +742,6 @@ public class JargetAgent {
         }
 
         return classpathBuilder.toString();
-    }
-
-    /**
-     * Downloads a JAR file from a URL and adds it to the classpath.
-     * Only allows downloads from trusted repositories for security.
-     * <p>
-     * This method implements secure URL-based dependency resolution with:
-     * </p>
-     * <ul>
-     *   <li>Repository trust validation against whitelist</li>
-     *   <li>Local cache management with integrity checking</li>
-     *   <li>Secure download with timeouts and size limits</li>
-     *   <li>Optional checksum verification for integrity</li>
-     *   <li>JAR file structure validation</li>
-     * </ul>
-     *
-     * @param urlString       URL to download the JAR from (must be from trusted repository)
-     * @param sha256Checksum  Optional SHA-256 checksum for verification (64 hex characters)
-     * @param md5Checksum     Optional MD5 checksum for verification (32 hex characters, alternative to SHA-256)
-     * @param instrumentation JVM instrumentation for runtime classpath modification
-     * @return Absolute path to the downloaded JAR file
-     * @throws Exception If download fails, URL is untrusted, validation fails, or security checks fail
-     */
-    private static String downloadAndAddFromUrl(String urlString, String sha256Checksum, String md5Checksum, Instrumentation instrumentation) throws Exception {
-        URL url = new URL(urlString);
-
-        // Security check - only allow trusted repositories
-        if (!isTrustedRepository(urlString)) {
-            throw new SecurityException("Untrusted repository: " + url.getHost() + ". Only trusted Maven repositories are allowed.");
-        }
-
-        // Extract filename from URL
-        String urlPath = url.getPath();
-        String filename = urlPath.substring(urlPath.lastIndexOf('/') + 1);
-        if (!filename.endsWith(".jar")) {
-            filename = "downloaded-" + System.currentTimeMillis() + ".jar";
-        }
-
-        Path cacheFile = getCacheDir().resolve(filename);
-
-        // Check if already cached with proper "Time-of-Check to Time-of-Use" handling
-        if (Files.exists(cacheFile)) {
-            logger.fine("Using cached: " + filename);
-            try {
-                if (!verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
-                    logger.severe("WARNING: Cached file checksum mismatch for " + filename);
-                    Files.deleteIfExists(cacheFile);
-                } else {
-                    addJarToClasspath(cacheFile, instrumentation);
-                    return cacheFile.toAbsolutePath().toString();
-                }
-            } catch (IOException e) {
-                logger.fine("Cache file disappeared or corrupted, re-downloading: " + filename);
-            }
-        }
-
-        logger.fine("Downloading from URL: " + urlString);
-        downloadFile(urlString, cacheFile);
-
-        // Verify checksum if provided
-        if (!verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
-            Files.deleteIfExists(cacheFile);
-            throw new SecurityException("Checksum verification failed for " + filename);
-        }
-
-        // Validate JAR file
-        validateJarFile(cacheFile);
-
-        addJarToClasspath(cacheFile, instrumentation);
-        logger.fine("Successfully downloaded and added: " + filename);
-
-        return cacheFile.toAbsolutePath().toString();
     }
     
     /**
@@ -792,7 +757,7 @@ public class JargetAgent {
      */
     private static boolean isTrustedRepository(String urlString) {
         try {
-            URL url = new URL(urlString);
+            new URL(urlString);
             for (String repo : trustedRepos) {
                 if (urlString.startsWith(repo)) {
                     return true;
@@ -914,7 +879,7 @@ public class JargetAgent {
                 URLConnection connection = url.openConnection();
                 connection.setConnectTimeout(downloadTimeoutSeconds * 1000);
                 connection.setReadTimeout(downloadTimeoutSeconds * 1000);
-                connection.setRequestProperty("User-Agent", "JavaDepAgent/1.0");
+                connection.setRequestProperty("User-Agent", "JargetAgent/1.1");
                 connection.setRequestProperty("Accept", "application/java-archive, application/octet-stream, */*");
 
                 // Enable certificate validation for HTTPS
@@ -989,7 +954,7 @@ public class JargetAgent {
         if (sha256Checksum != null) {
             sha256Valid = verifyChecksum(file, sha256Checksum, "SHA-256");
             if (sha256Valid) {
-                logger.fine("SHA-256 checksum verification passed");
+                logger.fine("SHA-256 checksum verification passed for " + file.getFileName());
             }
         }
 
@@ -997,7 +962,7 @@ public class JargetAgent {
         if (md5Checksum != null) {
             md5Valid = verifyChecksum(file, md5Checksum, "MD5");
             if (md5Valid) {
-                logger.fine("MD5 checksum verification passed");
+                logger.fine("MD5 checksum verification passed for " + file.getFileName());
             }
         }
 
@@ -1182,8 +1147,8 @@ public class JargetAgent {
      * @param args Command line arguments (currently unused)
      */
     public static void main(String[] args) {
-        System.out.println("Jarget - Dependency Management for Java");
-        System.out.println("=======================================");
+        System.out.println("Jarget - Dependency Management for Java (v1.1)");
+        System.out.println("==============================================");
 
         System.out.println("USAGE:");
         System.out.println("  java -javaagent:agent.jar [options] YourScript.java");
@@ -1204,6 +1169,8 @@ public class JargetAgent {
         System.out.println("    " + TRUSTED_REPOS_ENV + "=https://jitpack.io/;https://my-nexus.com/");
 
         System.out.println("  Download Settings:");
+        System.out.println("    -D" + PARALLEL_DOWNLOADS_PROP + "=8");
+        System.out.println("    " + PARALLEL_DOWNLOADS_ENV + "=8");
         System.out.println("    -D" + DOWNLOAD_TIMEOUT_PROP + "=60");
         System.out.println("    " + DOWNLOAD_TIMEOUT_ENV + "=60");
         System.out.println("    -D" + MAX_DOWNLOAD_SIZE_PROP + "=104857600  # 100MB in bytes");
@@ -1220,6 +1187,7 @@ public class JargetAgent {
 
         System.out.println("\nCURRENT CONFIGURATION:");
         System.out.println("  Log Level: " + currentLogLevel);
+        System.out.println("  Parallel Downloads: " + parallelDownloads);
         System.out.println("  Download Timeout: " + downloadTimeoutSeconds + " seconds");
         System.out.println("  Max Download Size: " + formatBytes(maxDownloadSize));
         System.out.println("  Max Retries: " + maxRetries);
@@ -1264,8 +1232,8 @@ public class JargetAgent {
         System.out.println("  # Basic usage");
         System.out.println("  java -javaagent:agent.jar MyScript.java");
 
-        System.out.println("  # Verbose logging");
-        System.out.println("  java -D" + LOG_LEVEL_PROP + "=VERBOSE -javaagent:agent.jar MyScript.java");
+        System.out.println("  # Verbose logging and more parallel downloads");
+        System.out.println("  java -D" + LOG_LEVEL_PROP + "=VERBOSE -D" + PARALLEL_DOWNLOADS_PROP + "=10 -javaagent:agent.jar MyScript.java");
 
         System.out.println("  # Custom cache and repositories");
         System.out.println("  java -D" + CACHE_DIR_PROP + "=/tmp/jars \\");
