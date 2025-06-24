@@ -282,6 +282,10 @@ java -Djarget.log.level=VERBOSE -javaagent:jarget.jar MyScript.java
 
 This project is authored by Shiraz Kanga. It is licensed under Apache 2.0 license.
 
+## TODO
+- Add parallel downloads (upto some max limit)
+- Add variables (like maven) where several jars get the same version
+
 ## Contributing
 
 When contributing:
