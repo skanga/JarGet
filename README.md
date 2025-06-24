@@ -13,7 +13,7 @@ A secure Java agent that processes dependency comments similar to `uv` in Python
 
 ## Quick Start
 
-1. **Download the agent JAR from repo root** (or build from source)
+1. **Download the pre-compiled [jarget.jar](https://github.com/skanga/JarGet/raw/refs/heads/main/jarget.jar) file from the github repository** (or build from source)
 2. **Add dependency comments** to your Java file:
    ```java
    // @dep org.apache.commons:commons-lang3:3.12.0
