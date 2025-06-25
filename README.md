@@ -283,8 +283,6 @@ java -Djarget.log.level=VERBOSE -javaagent:jarget.jar MyScript.java
 This project is authored by Shiraz Kanga. It is licensed under Apache 2.0 license.
 
 ## TODO
-- Add support for parallel downloads (upto some max limit)
-- Add variables (like maven has) which can be used when several related jars need to use the same version
 - Leverage local .m2 repository in the users home dir. 
   - If the repository is found, then look for the needed jar in it
   - Use that jar directly if present
