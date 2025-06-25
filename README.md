@@ -283,12 +283,10 @@ java -Djarget.log.level=VERBOSE -javaagent:jarget.jar MyScript.java
 This project is authored by Shiraz Kanga. It is licensed under Apache 2.0 license.
 
 ## TODO
-- Leverage local .m2 repository in the users home dir. 
-  - If the repository is found, then look for the needed jar in it
-  - Use that jar directly if present
-  - In jarget local cache add a metadata file which points to that exact jar
-  - Use the metadata file next time to avoid doing the search again
-
+- Add support for parallel downloads (upto some max limit)
+- Add variables (like maven has) which can be used when several related jars need to use the same version
+- Look for a .m2 repository in the users home. If found look for the needed jar there and use it if present
+  
 ## Contributing
 
 When contributing:
