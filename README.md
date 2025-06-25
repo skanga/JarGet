@@ -284,7 +284,6 @@ This project is authored by Shiraz Kanga. It is licensed under Apache 2.0 licens
 
 ## TODO
 - Add support for parallel downloads (upto some max limit)
-- Add variables (like maven has) which can be used when several related jars need to use the same version
 - Look for a .m2 repository in the users home. If found look for the needed jar there and use it if present
   
 ## Contributing
