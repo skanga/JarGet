@@ -9,6 +9,8 @@ A secure Java agent that processes dependency comments similar to `uv` in Python
 - **Security First**: Repository whitelisting, checksum verification, and path traversal protection
 - **Intelligent Caching**: Local cache with integrity verification to avoid re-downloads
 - **Flexible Configuration**: System properties and environment variables
+- **Improved Error Reporting**: Clear hints for malformed dependency lines (e.g., missing `}` or incorrect version format).
+- **Performance Metrics**: Verbose mode displays total dependency resolution time to help diagnose startup performance.
 - **Robust Downloads**: Retry logic with exponential backoff and timeout handling
 
 ## Quick Start
@@ -259,8 +261,9 @@ rm -rf ~/.jarget/cache/*
 
 **Performance issues:**
 - Use local cache effectively
-- Consider increasing download size limits
-- Use JAR directories for multiple local dependencies
+- Increase download size limits if needed
+- Use JAR directories for many local dependencies
+- Enable verbose logging (`-Djarget.log.level=VERBOSE`) to see total resolution time and identify slow steps.
 
 ### Debug Mode
 ```bash
@@ -283,8 +286,8 @@ java -Djarget.log.level=VERBOSE -javaagent:jarget.jar MyScript.java
 This project is authored by Shiraz Kanga. It is licensed under Apache 2.0 license.
 
 ## TODO
-- Add support for parallel downloads (upto some max limit)
 - Look for a .m2 repository in the users home. If found look for the needed jar there and use it if present
+- If a library has a dependant library then automatically include that one (with ability to optionally turn this off)
   
 ## Contributing
 
@@ -297,9 +300,14 @@ When contributing:
 
 ## Version History
 
+- **1.3** (Current)
+    - Added detailed error reporting for malformed dependency lines.
+    - Added total resolution time to verbose logging output for performance tuning.
 - **1.0**: Initial release with core dependency management features
     - Maven Central support
     - Local JAR and directory support
     - URL downloads with checksum verification
     - Comprehensive security features
     - Configurable caching and repositories
+
+

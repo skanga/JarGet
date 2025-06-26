@@ -1,7 +1,6 @@
 
 package jarget;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -21,11 +20,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ForkJoinPool;
 import java.util.jar.JarFile;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
+
+import static jarget.JargetAgent.LogLevel.*;
 
 /**
  * A secure Java agent that processes dependency comments similar to uv in Python.
@@ -83,9 +86,11 @@ public class JargetAgent {
     private static final String CACHE_DIR_ENV = "JARGET_CACHE_DIR";
     private static final String MAX_RETRIES_PROP = "jarget.max.retries";
     private static final String MAX_RETRIES_ENV = "JARGET_MAX_RETRIES";
+    private static final String PARALLEL_DOWNLOADS_PROP = "jarget.parallel.downloads";
+    private static final String PARALLEL_DOWNLOADS_ENV = "JARGET_PARALLEL_DOWNLOADS";
 
     // Custom Logging Infrastructure
-    private enum LogLevel {
+    enum LogLevel {
         SILENT,  // No output
         ERROR,   // Only errors
         INFO,    // Default: info and errors
@@ -94,35 +99,29 @@ public class JargetAgent {
 
     private static LogLevel currentLogLevel = LogLevel.INFO; // Default level
 
-    private static void logError(String message) {
-        if (currentLogLevel.ordinal() >= LogLevel.ERROR.ordinal()) {
-            System.err.printf("[Jarget] ERROR: %s%n", message);
+    private static void log(LogLevel level, String message) {
+        switch (level) {
+            case VERBOSE:
+                if (currentLogLevel.ordinal() >= LogLevel.VERBOSE.ordinal())
+                    System.out.printf("[JarGet] Debug: %s%n", message);
+                break;
+            case INFO:
+                if (currentLogLevel.ordinal() >= LogLevel.INFO.ordinal())
+                    System.out.printf("[JarGet] Info: %s%n", message);
+                break;
+            case ERROR:
+                if (currentLogLevel.ordinal() >= ERROR.ordinal())
+                    System.err.printf("[JarGet] ERROR: %s%n", message);
+                break;
+            case SILENT: break;
+            default: break;
         }
     }
 
-    private static void logError(String message, Throwable t) {
-        if (currentLogLevel.ordinal() >= LogLevel.ERROR.ordinal()) {
-            System.err.printf("[Jarget] ERROR: %s%n", message);
+    private static void log(LogLevel level, String message, Throwable t) {
+        log(level, message);
+        if (currentLogLevel.ordinal() >= ERROR.ordinal()) {
             t.printStackTrace(System.err);
-        }
-    }
-
-    private static void logInfo(String message) {
-        if (currentLogLevel.ordinal() >= LogLevel.INFO.ordinal()) {
-            System.out.printf("[Jarget] INFO: %s%n", message);
-        }
-    }
-
-    private static void logVerbose(String message) {
-        if (currentLogLevel.ordinal() >= LogLevel.VERBOSE.ordinal()) {
-            System.out.printf("[Jarget] DEBUG: %s%n", message);
-        }
-    }
-
-    private static void logVerbose(String message, Throwable t) {
-        if (currentLogLevel.ordinal() >= LogLevel.VERBOSE.ordinal()) {
-            System.out.printf("[Jarget] DEBUG: %s%n", message);
-            t.printStackTrace(System.out);
         }
     }
 
@@ -130,6 +129,7 @@ public class JargetAgent {
     private static int downloadTimeoutSeconds = 30;
     private static long maxDownloadSize = 100 * 1024 * 1024; // 100MB
     private static int maxRetries = 3;
+    private static int parallelDownloads = 4;
     private static Path cacheDir = null;
 
     // Dynamic trusted repositories
@@ -203,13 +203,13 @@ public class JargetAgent {
      * This method is called automatically by the shutdown hook.
      */
     private static void cleanupResources() {
-        logVerbose("Cleaning up resources...");
+        log(VERBOSE, "Cleaning up resources...");
         for (JarFile jar : openJarFiles) {
             try {
                 jar.close();
             } catch (IOException e) {
                 // Log but don't throw during shutdown
-                logError("Failed to close JAR file during cleanup: " + jar.getName(), e);
+                log(ERROR, "Failed to close JAR file during cleanup: " + jar.getName(), e);
             }
         }
         openJarFiles.clear();
@@ -224,12 +224,13 @@ public class JargetAgent {
      */
     public static void premain(String agentArgs, Instrumentation instrumentation) {
         try {
+            long startTime = System.nanoTime();
             initializeConfiguration();
-            logVerbose("Starting dependency resolution...");
+            log(VERBOSE, "Starting dependency resolution...");
 
             String command = System.getProperty("sun.java.command");
             if (command == null || command.isEmpty()) {
-                logError("Could not determine launch command.");
+                log(ERROR, "Could not determine launch command.");
                 return;
             }
 
@@ -242,14 +243,16 @@ public class JargetAgent {
                 String newClasspath = currentClasspath.isEmpty() ?
                         additionalClasspath : currentClasspath + File.pathSeparator + additionalClasspath;
                 System.setProperty("java.class.path", newClasspath);
-                logVerbose("Updated java.class.path with dependencies");
+                log(VERBOSE, "Updated java.class.path with dependencies");
             }
+            long durationMs = (System.nanoTime() - startTime) / 1_000_000;
+            log(INFO, "Dependency resolution finished in " + durationMs + "ms.");
         } catch (SecurityException e) {
-            logError("Security error: " + e.getMessage());
+            log(ERROR, "Security error: " + e.getMessage());
         } catch (IOException e) {
-            logError("I/O error processing dependencies: " + e.getMessage());
+            log(ERROR, "I/O error processing dependencies: " + e.getMessage());
         } catch (Exception e) {
-            logError("Unexpected error processing dependencies: " + e.getMessage());
+            log(ERROR, "Unexpected error processing dependencies: " + e.getMessage());
         }
     }
 
@@ -275,7 +278,7 @@ public class JargetAgent {
                     downloadTimeoutSeconds = 30;
                 }
             } catch (NumberFormatException e) {
-                logVerbose("Invalid timeout value, using default: 30 seconds");
+                log(VERBOSE, "Invalid timeout value, using default: 30 seconds");
             }
         }
 
@@ -288,7 +291,7 @@ public class JargetAgent {
                     maxDownloadSize = 50 * 1024 * 1024;
                 }
             } catch (NumberFormatException e) {
-                logVerbose("Invalid max size value, using default: 50MB");
+                log(VERBOSE, "Invalid max size value, using default: 50MB");
             }
         }
 
@@ -301,7 +304,20 @@ public class JargetAgent {
                     maxRetries = 3;
                 }
             } catch (NumberFormatException e) {
-                logVerbose("Invalid max retries value, using default: 3");
+                log(VERBOSE, "Invalid max retries value, using default: 3");
+            }
+        }
+
+        // Initialize parallel downloads
+        String parallelStr = System.getProperty(PARALLEL_DOWNLOADS_PROP, System.getenv(PARALLEL_DOWNLOADS_ENV));
+        if (parallelStr != null) {
+            try {
+                parallelDownloads = Integer.parseInt(parallelStr);
+                if (parallelDownloads <= 0) {
+                    parallelDownloads = 4; // Reset to default if invalid
+                }
+            } catch (NumberFormatException e) {
+                log(VERBOSE, "Invalid parallel downloads value, using default: 4");
             }
         }
 
@@ -309,7 +325,7 @@ public class JargetAgent {
         String cacheDirStr = System.getProperty(CACHE_DIR_PROP, System.getenv(CACHE_DIR_ENV));
         if (cacheDirStr != null && !cacheDirStr.trim().isEmpty()) {
             cacheDir = Paths.get(cacheDirStr.trim());
-            logVerbose("Using custom cache directory: " + cacheDir);
+            log(VERBOSE, "Using custom cache directory: " + cacheDir);
         }
 
         // Initialize trusted repositories
@@ -325,7 +341,7 @@ public class JargetAgent {
                         repo += "/";
                     }
                     trustedRepos.add(repo);
-                    logVerbose("Added trusted repository: " + repo);
+                    log(VERBOSE, "Added trusted repository: " + repo);
                 }
             }
         }
@@ -340,22 +356,22 @@ public class JargetAgent {
         }
 
         Matcher matcher = VAR_SUBSTITUTION_PATTERN.matcher(line);
-        StringBuffer sb = new StringBuffer();
+        StringBuffer stringBuffer = new StringBuffer();
 
         while (matcher.find()) {
             String varName = matcher.group(1);
             String varValue = variables.get(varName);
             if (varValue != null) {
                 // Use quoteReplacement to handle special characters in the value
-                matcher.appendReplacement(sb, Matcher.quoteReplacement(varValue));
+                matcher.appendReplacement(stringBuffer, Matcher.quoteReplacement(varValue));
             } else {
-                logError("Variable '" + varName + "' not defined, but used in: " + line);
+                log(ERROR, "Variable '" + varName + "' not defined, but used in: " + line);
                 // Leave the placeholder as-is if not found, to make the error obvious
-                matcher.appendReplacement(sb, Matcher.quoteReplacement(matcher.group(0)));
+                matcher.appendReplacement(stringBuffer, Matcher.quoteReplacement(matcher.group(0)));
             }
         }
-        matcher.appendTail(sb);
-        return sb.toString();
+        matcher.appendTail(stringBuffer);
+        return stringBuffer.toString();
     }
 
     /**
@@ -371,51 +387,62 @@ public class JargetAgent {
     private static String processDependencies(String command, Instrumentation instrumentation) throws IOException {
         Path sourcePath = findSourcePath(command);
         if (!Files.exists(sourcePath)) {
-            logError("Source file not found: " + sourcePath);
+            log(ERROR, "Source file not found: " + sourcePath);
             return "";
         }
 
-        logInfo("Processing dependencies from: " + sourcePath);
+        log(INFO, "Processing dependencies from: " + sourcePath);
 
         List<String> allLines = Files.readAllLines(sourcePath);
         Map<String, String> variables = new HashMap<>();
 
-        // Pass 1: Collect all variable definitions
-        logVerbose("Pass 1: Scanning for variable definitions...");
+        // Pass 1: Collect all variable definitions, resolving them as we go.
+        log(VERBOSE, "Pass 1: Scanning for variable definitions...");
         for (String line : allLines) {
             Matcher varMatcher = VAR_PATTERN.matcher(line.trim());
             if (varMatcher.find()) {
                 String name = varMatcher.group(1).trim();
                 String value = varMatcher.group(2).trim();
-                variables.put(name, value);
-                logVerbose("Defined variable: " + name + " = " + value);
+                // Substitute existing variables in the value before storing it.
+                String substitutedValue = substituteVariables(value, variables);
+                variables.put(name, substitutedValue);
+                log(VERBOSE, "Defined variable: " + name + " = " + substitutedValue);
             }
         }
 
         // Pass 2: Process directives with variable substitution
-        logVerbose("Pass 2: Processing dependency directives...");
-        StringBuilder classpathBuilder = new StringBuilder();
-        for (String rawLine : allLines) {
-            String line = rawLine.trim();
-
-            // Skip variable definitions in this pass
-            if (VAR_PATTERN.matcher(line).matches()) {
-                continue;
-            }
-
-            // Substitute variables before processing the line
-            String substitutedLine = substituteVariables(line, variables);
-
-            String jarPath = processDependencyLine(substitutedLine, instrumentation);
-            if (jarPath != null && !jarPath.isEmpty()) {
-                if (classpathBuilder.length() > 0) {
-                    classpathBuilder.append(File.pathSeparator);
-                }
-                classpathBuilder.append(jarPath);
-            }
+        log(VERBOSE, "Pass 2: Processing dependency directives...");
+        if (parallelDownloads <= 1) {
+            log(VERBOSE, "Using sequential processing.");
+            return allLines.stream()
+                    .map(String::trim)
+                    .filter(line -> !VAR_PATTERN.matcher(line).matches())
+                    .map(line -> substituteVariables(line, variables))
+                    .map(substitutedLine -> processDependencyLine(substitutedLine, instrumentation))
+                    .filter(jarPath -> jarPath != null && !jarPath.isEmpty())
+                    .collect(Collectors.joining(File.pathSeparator));
         }
 
-        return classpathBuilder.toString();
+        ForkJoinPool customPool = new ForkJoinPool(parallelDownloads);
+        try {
+            log(VERBOSE, "Using parallel processing with " + parallelDownloads + " threads.");
+            return customPool.submit(() ->
+                    allLines.parallelStream()
+                            .map(String::trim)
+                            .filter(line -> !VAR_PATTERN.matcher(line).matches())
+                            .map(line -> substituteVariables(line, variables))
+                            .map(substitutedLine -> processDependencyLine(substitutedLine, instrumentation))
+                            .filter(jarPath -> jarPath != null && !jarPath.isEmpty())
+                            .collect(Collectors.joining(File.pathSeparator))
+            ).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Parallel dependency processing was interrupted", e);
+        } catch (Exception e) {
+            throw new IOException("Failed to process dependencies in parallel", e);
+        } finally {
+            customPool.shutdown();
+        }
     }
 
     /**
@@ -440,18 +467,18 @@ public class JargetAgent {
             String sha256Checksum = depMatcher.group(4);
             String md5Checksum = depMatcher.group(5);
 
-            logVerbose("Found dependency: " + groupId + ":" + artifactId + ":" + version);
+            log(VERBOSE, "Found dependency: " + groupId + ":" + artifactId + ":" + version);
 
             try {
                 return downloadAndAddDependency(groupId, artifactId, version, sha256Checksum, md5Checksum, instrumentation);
             } catch (SecurityException e) {
-                logError("Security error for dependency " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
+                log(ERROR, "Security error for dependency " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
                 return null;
             } catch (IOException e) {
-                logError("I/O error for dependency " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
+                log(ERROR, "I/O error for dependency " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
                 return null;
             } catch (Exception e) {
-                logError("Failed to resolve dependency " + groupId + ":" + artifactId + ":" + version, e);
+                log(ERROR, "Failed to resolve dependency " + groupId + ":" + artifactId + ":" + version, e);
                 return null;
             }
         }
@@ -460,18 +487,18 @@ public class JargetAgent {
         Matcher jarMatcher = JAR_PATTERN.matcher(line);
         if (jarMatcher.find()) {
             String jarPath = jarMatcher.group(1).trim();
-            logVerbose("Found JAR: " + jarPath);
+            log(VERBOSE, "Found JAR: " + jarPath);
 
             try {
                 return addLocalJar(jarPath, instrumentation);
             } catch (SecurityException e) {
-                logError("Security error for JAR " + jarPath + ": " + e.getMessage());
+                log(ERROR, "Security error for JAR " + jarPath + ": " + e.getMessage());
                 return null;
             } catch (IOException e) {
-                logError("I/O error for JAR " + jarPath + ": " + e.getMessage());
+                log(ERROR, "I/O error for JAR " + jarPath + ": " + e.getMessage());
                 return null;
             } catch (Exception e) {
-                logError("Failed to add local JAR " + jarPath, e);
+                log(ERROR, "Failed to add local JAR " + jarPath, e);
                 return null;
             }
         }
@@ -480,18 +507,18 @@ public class JargetAgent {
         Matcher dirMatcher = DIR_PATTERN.matcher(line);
         if (dirMatcher.find()) {
             String dirPath = dirMatcher.group(1).trim();
-            logVerbose("Found directory: " + dirPath);
+            log(VERBOSE, "Found directory: " + dirPath);
 
             try {
                 return addJarsFromDirectory(dirPath, instrumentation);
             } catch (SecurityException e) {
-                logError("Security error for directory " + dirPath + ": " + e.getMessage());
+                log(ERROR, "Security error for directory " + dirPath + ": " + e.getMessage());
                 return null;
             } catch (IOException e) {
-                logError("I/O error for directory " + dirPath + ": " + e.getMessage());
+                log(ERROR, "I/O error for directory " + dirPath + ": " + e.getMessage());
                 return null;
             } catch (Exception e) {
-                logError("Unexpected error for directory " + dirPath + ": " + e.getMessage());
+                log(ERROR, "Unexpected error for directory " + dirPath + ": " + e.getMessage());
                 return null;
             }
         }
@@ -502,20 +529,36 @@ public class JargetAgent {
             String url = urlMatcher.group(1);
             String sha256Checksum = urlMatcher.group(2);
             String md5Checksum = urlMatcher.group(3);
-            logVerbose("Found URL: " + url);
+            log(VERBOSE, "Found URL: " + url);
 
             try {
                 return downloadAndAddFromUrl(url, sha256Checksum, md5Checksum, instrumentation);
             } catch (SecurityException e) {
-                logError("Security error for URL " + url + ": " + e.getMessage());
+                log(ERROR, "Security error for URL " + url + ": " + e.getMessage());
                 return null;
             } catch (IOException e) {
-                logError("I/O error for URL " + url + ": " + e.getMessage());
+                log(ERROR, "I/O error for URL " + url + ": " + e.getMessage());
                 return null;
             } catch (Exception e) {
-                logError("Unexpected error for URL " + url + ": " + e.getMessage());
+                log(ERROR, "Unexpected error for URL " + url + ": " + e.getMessage());
                 return null;
             }
+        }
+
+        // If we fall through, no valid directive was found.
+        // Check if the line appears to be a malformed directive and log an error.
+        if (line.matches("//\\s*@(dep|jar|dir|url).*")) {
+            // This line starts like one of our directives but failed to parse fully.
+            String hint = "";
+            if (line.contains("@dep")) {
+                hint = " Hint: Check format 'groupId:artifactId:version'.";
+            }
+            if (line.contains("${")) {
+                hint += " Hint: Check for an unclosed or undefined variable, e.g., missing '}'.";
+            } else if (line.contains("$")) {
+                hint += " Hint: Variables must use the ${name} format.";
+            }
+            log(ERROR, "Malformed or incomplete dependency directive." + hint + " Offending line: " + line);
         }
 
         // No dependency directive found in this line
@@ -557,23 +600,23 @@ public class JargetAgent {
 
         // Check if already cached with proper TOCTOU handling
         if (Files.exists(cacheFile)) {
-            logInfo("Using cached dependency: " + filename);
+            log(INFO, "Using cached dependency: " + filename);
             try {
                 if (verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
                     addJarToClasspath(cacheFile, instrumentation);
                     return cacheFile.toAbsolutePath().toString();
                 } else {
-                    logError("Cached file checksum mismatch for " + filename);
+                    log(ERROR, "Cached file checksum mismatch for " + filename);
                     Files.deleteIfExists(cacheFile); // Use deleteIfExists to handle race conditions
                 }
             } catch (IOException e) {
-                logVerbose("Cache file disappeared or corrupted, re-downloading: " + filename);
+                log(VERBOSE, "Cache file disappeared or corrupted, re-downloading: " + filename);
             }
         }
 
         // Download from Maven Central (most trusted)
         String downloadUrl = buildMavenCentralUrl(groupId, artifactId, version);
-        logInfo("Downloading : " + downloadUrl);
+        log(INFO, "Downloading : " + downloadUrl);
 
         downloadFile(downloadUrl, cacheFile);
 
@@ -586,7 +629,7 @@ public class JargetAgent {
         validateJarFile(cacheFile);
 
         addJarToClasspath(cacheFile, instrumentation);
-        logInfo("Successfully added dependency: " + filename);
+        log(INFO, "Successfully added dependency: " + filename);
 
         return cacheFile.toAbsolutePath().toString();
     }
@@ -636,7 +679,7 @@ public class JargetAgent {
         validateJarFile(jarFile);
 
         addJarToClasspath(jarFile, instrumentation);
-        logInfo("Successfully added local JAR: " + jarFile.getFileName());
+        log(INFO, "Successfully added local JAR: " + jarFile.getFileName());
 
         return jarFile.toAbsolutePath().toString();
     }
@@ -701,11 +744,11 @@ public class JargetAgent {
             throw new IOException("Path is not a directory: " + directory);
         }
 
-        logVerbose("Scanning directory for JARs: " + directory);
+        log(VERBOSE, "Scanning directory for JARs: " + directory);
 
         File[] jarFiles = directory.toFile().listFiles((dir, name) -> name.toLowerCase().endsWith(".jar"));
         if (jarFiles == null || jarFiles.length == 0) {
-            logVerbose("No JAR files found in directory: " + directory);
+            log(VERBOSE, "No JAR files found in directory: " + directory);
             return "";
         }
 
@@ -715,15 +758,15 @@ public class JargetAgent {
             try {
                 validateJarFile(jarFile.toPath());
                 addJarToClasspath(jarFile.toPath(), instrumentation);
-                logInfo("Added JAR from directory: " + jarFile.getName());
+                log(INFO, "Added JAR from directory: " + jarFile.getName());
 
                 if (classpathBuilder.length() > 0) {
                     classpathBuilder.append(File.pathSeparator);
                 }
                 classpathBuilder.append(jarFile.getAbsolutePath());
             } catch (Exception e) {
-                logError("Failed to add JAR: " + jarFile.getName() + " - " + e.getMessage());
-                logVerbose("JAR addition failure details for " + jarFile.getName(), e);
+                log(ERROR, "Failed to add JAR: " + jarFile.getName() + " - " + e.getMessage());
+                log(VERBOSE, "JAR addition failure details for " + jarFile.getName(), e);
             }
         }
 
@@ -770,21 +813,21 @@ public class JargetAgent {
 
         // Check if already cached with proper "Time-of-Check to Time-of-Use" handling
         if (Files.exists(cacheFile)) {
-            logInfo("Using cached URL dependency: " + filename);
+            log(INFO, "Using cached URL dependency: " + filename);
             try {
                 if (!verifyAnyChecksum(cacheFile, sha256Checksum, md5Checksum)) {
-                    logError("Cached file checksum mismatch for " + filename);
+                    log(ERROR, "Cached file checksum mismatch for " + filename);
                     Files.deleteIfExists(cacheFile);
                 } else {
                     addJarToClasspath(cacheFile, instrumentation);
                     return cacheFile.toAbsolutePath().toString();
                 }
             } catch (IOException e) {
-                logVerbose("Cache file disappeared or corrupted, re-downloading: " + filename);
+                log(VERBOSE, "Cache file disappeared or corrupted, re-downloading: " + filename);
             }
         }
 
-        logInfo("Downloading from URL: " + urlString);
+        log(INFO, "Downloading from URL: " + urlString);
         downloadFile(urlString, cacheFile);
 
         // Verify checksum if provided
@@ -797,7 +840,7 @@ public class JargetAgent {
         validateJarFile(cacheFile);
 
         addJarToClasspath(cacheFile, instrumentation);
-        logInfo("Successfully downloaded and added: " + filename);
+        log(INFO, "Successfully downloaded and added: " + filename);
 
         return cacheFile.toAbsolutePath().toString();
     }
@@ -896,7 +939,7 @@ public class JargetAgent {
         // Basic validation - try to open as JAR
         try (JarFile jarFile = new JarFile(jarPath.toFile())) {
             // JAR file is valid if we can open it
-            logVerbose("JAR validation successful: " + jarPath.getFileName());
+            log(VERBOSE, "JAR validation successful: " + jarPath.getFileName());
         }
     }
 
@@ -932,7 +975,7 @@ public class JargetAgent {
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                logVerbose("Download attempt " + attempt + "/" + maxRetries + ": " + urlString);
+                log(VERBOSE, "Download attempt " + attempt + "/" + maxRetries + ": " + urlString);
 
                 URLConnection connection = url.openConnection();
                 connection.setConnectTimeout(downloadTimeoutSeconds * 1000);
@@ -955,19 +998,19 @@ public class JargetAgent {
                         throw new IOException("Downloaded file exceeds maximum size limit: " + maxDownloadSize + " bytes");
                     }
 
-                    logVerbose("Successfully downloaded " + bytesDownloaded + " bytes");
+                    log(VERBOSE, "Successfully downloaded " + bytesDownloaded + " bytes");
                     return; // Success
                 }
 
             } catch (IOException e) {
                 lastException = e;
-                logVerbose("Download attempt " + attempt + " failed: " + e.getMessage());
+                log(VERBOSE, "Download attempt " + attempt + " failed: " + e.getMessage());
 
                 if (attempt < maxRetries) {
                     try {
                         // Exponential backoff: 1s, 2s, 4s, etc.
                         long delayMs = 1000L * (1L << (attempt - 1));
-                        logVerbose("Retrying in " + delayMs + "ms...");
+                        log(VERBOSE, "Retrying in " + delayMs + "ms...");
                         Thread.sleep(delayMs);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
@@ -1012,7 +1055,7 @@ public class JargetAgent {
         if (sha256Checksum != null) {
             sha256Valid = verifyChecksum(file, sha256Checksum, "SHA-256");
             if (sha256Valid) {
-                logVerbose("SHA-256 checksum verification passed");
+                log(VERBOSE, "SHA-256 checksum verification passed");
             }
         }
 
@@ -1020,7 +1063,7 @@ public class JargetAgent {
         if (md5Checksum != null) {
             md5Valid = verifyChecksum(file, md5Checksum, "MD5");
             if (md5Valid) {
-                logVerbose("MD5 checksum verification passed");
+                log(VERBOSE, "MD5 checksum verification passed");
             }
         }
 
@@ -1060,14 +1103,14 @@ public class JargetAgent {
             }
 
             byte[] hashBytes = digest.digest();
-            StringBuilder sb = new StringBuilder();
+            StringBuilder stringBuilder = new StringBuilder();
             for (byte b : hashBytes) {
-                sb.append(String.format("%02x", b));
+                stringBuilder.append(String.format("%02x", b));
             }
 
-            return sb.toString().equalsIgnoreCase(expectedChecksum);
+            return stringBuilder.toString().equalsIgnoreCase(expectedChecksum);
         } catch (Exception e) {
-            logError(algorithm + " checksum verification failed: " + e.getMessage());
+            log(ERROR, algorithm + " checksum verification failed: " + e.getMessage());
             return false;
         }
     }
@@ -1137,7 +1180,7 @@ public class JargetAgent {
      * @return Path to the cache directory (created if it doesn't exist)
      * @throws IOException If directory cannot be created or accessed
      */
-    private static Path getCacheDir() throws IOException {
+    private static synchronized Path getCacheDir() throws IOException {
         if (cacheDir == null) {
             // Use user's cache directory, similar to how uv works
             String userHome = System.getProperty("user.home");
@@ -1146,9 +1189,9 @@ public class JargetAgent {
 
         if (!Files.exists(cacheDir)) {
             Files.createDirectories(cacheDir);
-            logVerbose("Created cache directory: " + cacheDir);
+            log(VERBOSE, "Created cache directory: " + cacheDir);
         } else {
-            logVerbose("Using cache directory: " + cacheDir);
+            log(VERBOSE, "Using cache directory: " + cacheDir);
         }
         return cacheDir;
     }
@@ -1173,7 +1216,7 @@ public class JargetAgent {
             instrumentation.appendToSystemClassLoaderSearch(jarFile);
             // Keep reference to prevent GC from closing the JarFile
             openJarFiles.add(jarFile);
-            logVerbose("Added to classpath: " + jarPath.getFileName());
+            log(VERBOSE, "Added to classpath: " + jarPath.getFileName());
         } catch (Exception e) {
             // If instrumentation fails, close the JarFile to prevent resource leak
             try {
@@ -1233,6 +1276,8 @@ public class JargetAgent {
         System.out.println("    " + MAX_DOWNLOAD_SIZE_ENV + "=104857600");
         System.out.println("    -D" + MAX_RETRIES_PROP + "=5");
         System.out.println("    " + MAX_RETRIES_ENV + "=5");
+        System.out.println("    -D" + PARALLEL_DOWNLOADS_PROP + "=8");
+        System.out.println("    " + PARALLEL_DOWNLOADS_ENV + "=8");
 
         System.out.println("\n  Cache Directory:");
         System.out.println("    -D" + CACHE_DIR_PROP + "=/custom/cache/path");
@@ -1241,12 +1286,12 @@ public class JargetAgent {
         // Initialize configuration to get current settings
         initializeConfiguration();
 
-
         System.out.println("\nCURRENT CONFIGURATION:");
         System.out.println("  Log Level: " + currentLogLevel);
         System.out.println("  Download Timeout: " + downloadTimeoutSeconds + " seconds");
         System.out.println("  Max Download Size: " + formatBytes(maxDownloadSize));
         System.out.println("  Max Retries: " + maxRetries);
+        System.out.println("  Parallel Downloads: " + parallelDownloads);
 
         try {
             Path currentCacheDir = getCacheDir();
