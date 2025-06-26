@@ -69,10 +69,11 @@ import static jarget.JargetAgent.LogLevel.*;
  * </ul>
  *
  * @author Shiraz Kanga
- * @version 1.2
+ * @version 1.4
  * @since 1.0
  */
 public class JargetAgent {
+    public static final double JARGET_VERSION = 1.4;
     // Configuration constants
     private static final String TRUSTED_REPOS_PROP = "jarget.trusted.repos";
     private static final String TRUSTED_REPOS_ENV = "JARGET_TRUSTED_REPOS";
@@ -1022,7 +1023,7 @@ public class JargetAgent {
                 URLConnection connection = url.openConnection();
                 connection.setConnectTimeout(downloadTimeoutSeconds * 1000);
                 connection.setReadTimeout(downloadTimeoutSeconds * 1000);
-                connection.setRequestProperty("User-Agent", "JavaDepAgent/1.0");
+                connection.setRequestProperty("User-Agent", "JarGet/" + JARGET_VERSION);
                 connection.setRequestProperty("Accept", "application/java-archive, application/octet-stream, */*");
 
                 // Enable certificate validation for HTTPS

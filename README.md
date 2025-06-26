@@ -286,7 +286,6 @@ java -Djarget.log.level=VERBOSE -javaagent:jarget.jar MyScript.java
 This project is authored by Shiraz Kanga. It is licensed under Apache 2.0 license.
 
 ## TODO
-- Look for a .m2 repository in the users home. If found look for the needed jar there and use it if present
 - If a library has a dependant library then automatically include that one (with ability to optionally turn this off)
   
 ## Contributing
@@ -300,9 +299,14 @@ When contributing:
 
 ## Version History
 
-- **1.3** (Current)
+- **1.4** (Current)
+    - If a jar is found in local .m2 repository then no need to download. Just use that one.
+- **1.3**
+    - Added parallel downloads using multi-threading
     - Added detailed error reporting for malformed dependency lines.
     - Added total resolution time to verbose logging output for performance tuning.
+- **1.2**
+    - Added support for variables
 - **1.0**: Initial release with core dependency management features
     - Maven Central support
     - Local JAR and directory support
