@@ -42,7 +42,7 @@ import static jarget.JargetAgent.LogLevel.*;
  * <ul>
  *   <li>{@code // @var name=value} - Defines a variable for substitution</li>
  *   <li>{@code // @dep groupId:artifactId:version} - Maven dependency</li>
- *   <li>{@code // @dep groupId:artifactId:version sha256:<sha-sum>} - Maven dependency with checksum</li>
+ *   <li>{@code // @dep groupId:artifactId:version [md5|sha256:<checksum>]} - Maven dependency with checksum</li>
  *   <li>{@code // @jar /path/to/local.jar} - Local JAR file</li>
  *   <li>{@code // @dir /path/to/jar-directory} - Directory of JARs</li>
  *   <li>{@code // @url https://repo.com/lib.jar} - Direct URL download</li>
@@ -566,6 +566,31 @@ public class JargetAgent {
     }
 
     /**
+     * Constructs the path to a JAR in the local Maven (.m2) repository.
+     * @param groupId Maven group ID
+     * @param artifactId Maven artifact ID
+     * @param version Maven version
+     * @return The potential path to the JAR file, or null if user home is not found.
+     */
+    private static Path resolveMavenPath(String groupId, String artifactId, String version) {
+        String userHome = System.getProperty("user.home");
+        if (userHome == null) {
+            log(VERBOSE, "User home directory not found, skipping .m2 repository check.");
+            return null;
+        }
+
+        Path m2RepoPath = Paths.get(userHome, ".m2", "repository");
+        String groupPath = groupId.replace('.', File.separatorChar);
+        String jarName = artifactId + "-" + version + ".jar";
+
+        // Construct the full path using resolve for cross-platform safety
+        return m2RepoPath.resolve(groupPath)
+                         .resolve(artifactId)
+                         .resolve(version)
+                         .resolve(jarName);
+    }
+
+    /**
      * Downloads a Maven artifact from Maven Central and adds it to the classpath.
      * Uses local cache to avoid re-downloading existing artifacts.
      * <p>
@@ -594,6 +619,23 @@ public class JargetAgent {
 
         // Validate inputs to prevent injection attacks
         validateMavenCoordinate(groupId, artifactId, version);
+
+        // Check local Maven repository first
+        Path m2JarPath = resolveMavenPath(groupId, artifactId, version);
+        if (m2JarPath != null && Files.exists(m2JarPath)) {
+            log(INFO, "Found dependency in local Maven repository: " + m2JarPath.getFileName());
+            try {
+                if (verifyAnyChecksum(m2JarPath, sha256Checksum, md5Checksum)) {
+                    validateJarFile(m2JarPath);
+                    addJarToClasspath(m2JarPath, instrumentation);
+                    return m2JarPath.toAbsolutePath().toString();
+                } else {
+                    log(INFO, "Local Maven repository file checksum mismatch for " + m2JarPath.getFileName() + ". Will attempt download.");
+                }
+            } catch (IOException e) {
+                log(INFO, "Local Maven repository file is invalid or corrupted (" + m2JarPath.getFileName() + "): " + e.getMessage() + ". Will attempt download.");
+            }
+        }
 
         String filename = artifactId + "-" + version + ".jar";
         Path cacheFile = getCacheDir().resolve(filename);
